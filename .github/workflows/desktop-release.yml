@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Version tag (e.g. v1.0.0)'
-        required: true
+        description: 'Optional release tag for reference (e.g. v1.0.0); manual runs always upload Actions artifacts.'
+        required: false
 
 permissions:
   contents: write
@@ -33,21 +33,23 @@ jobs:
       - name: Build
         run: pnpm run build
       - name: Package (macOS arm64)
-        run: pnpm exec electron-builder --mac --arm64
+        run: pnpm exec electron-builder --mac dmg zip --arm64 --publish "$PUBLISH_MODE"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # NOTE: Mac Intel (x64) is intentionally NOT a separate job.
-  # `mac.target` in package.json lists both arm64 and x64, and the arm64 runner
-  # cross-builds the x64 DMG in the same `electron-builder --mac --arm64` step.
-  # On v0.1.3 the dedicated macos-13 Intel job stalled in the runner queue for
-  # 30+ min while the arm64 job had already published both arches. Keeping a
-  # standalone Intel job just blocks publish-aliases for no benefit.
-  # If pure-x64 builds are ever needed (e.g. signing differences), reintroduce
-  # the job and split mac.target between the two configs.
+          PUBLISH_MODE: ${{ github.event_name == 'push' && 'always' || 'never' }}
+      - name: Upload macOS arm64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nomi-mac-arm64
+          path: |
+            release/*arm64*.dmg
+            release/*arm64*.zip
+            release/*arm64*.blockmap
+            release/latest-mac.yml
+          if-no-files-found: error
 
   build-win:
-    name: Build Windows
+    name: Build Windows (x64)
     runs-on: windows-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -64,14 +66,25 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build
         run: pnpm run build
-      - name: Package (Windows)
-        run: pnpm exec electron-builder --win --x64
+      - name: Package (Windows x64)
+        run: pnpm exec electron-builder --win nsis --x64 --publish "$env:PUBLISH_MODE"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_MODE: ${{ github.event_name == 'push' && 'always' || 'never' }}
+      - name: Upload Windows x64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nomi-windows-x64
+          path: |
+            release/*x64*.exe
+            release/*x64*.blockmap
+            release/latest.yml
+          if-no-files-found: error
 
   publish-aliases:
     name: Publish stable-name aliases
     needs: [build-mac-arm64, build-win]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -97,9 +110,7 @@ jobs:
           ls artifacts/
           # Rename to stable names
           for f in artifacts/*arm64*.dmg; do cp "$f" artifacts/Nomi-mac-arm64.dmg 2>/dev/null || true; done
-          for f in artifacts/*x64*.dmg; do cp "$f" artifacts/Nomi-mac-intel.dmg 2>/dev/null || true; done
-          for f in artifacts/*.exe; do cp "$f" artifacts/Nomi-windows-setup.exe 2>/dev/null || true; done
+          for f in artifacts/*x64*.exe; do cp "$f" artifacts/Nomi-windows-x64-setup.exe 2>/dev/null || true; done
           # Upload stable-name aliases
           gh release upload "$TAG" artifacts/Nomi-mac-arm64.dmg --clobber 2>/dev/null || true
-          gh release upload "$TAG" artifacts/Nomi-mac-intel.dmg --clobber 2>/dev/null || true
-          gh release upload "$TAG" artifacts/Nomi-windows-setup.exe --clobber 2>/dev/null || true
+          gh release upload "$TAG" artifacts/Nomi-windows-x64-setup.exe --clobber 2>/dev/null || true
